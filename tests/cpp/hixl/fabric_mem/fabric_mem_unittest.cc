@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <algorithm>
 #include <sys/epoll.h>
 
 #include <future>
@@ -739,6 +740,12 @@ TEST_F(FabricMemLocalMemoryUTest, DeviceForeignImportsEveryBlockAndSplitsD2dAcro
   ASSERT_EQ(FabricMemTransferService::TransOpAddr(kBase1, 8U, remote_mappings, expected_remote1), SUCCESS);
   FabricMemTransferContext context;
   context.remote_va_to_old_va = remote_mappings;
+  context.remote_segments.reserve(remote_mappings.size());
+  for (const auto &[new_va, info] : remote_mappings) {
+    context.remote_segments.emplace_back(RemoteSegmentEntry{info.va_addr, new_va, info.len});
+  }
+  std::sort(context.remote_segments.begin(), context.remote_segments.end(),
+            [](const RemoteSegmentEntry &lhs, const RemoteSegmentEntry &rhs) { return lhs.old_va < rhs.old_va; });
   FabricMemHostTransferService service;
   service.local_memory_ = &local_memory_;
   std::vector<TransferOpDesc> op_descs = {{kLocalAddr, kBase1 - 8U, 16U}};
