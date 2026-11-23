@@ -11,6 +11,7 @@
 set(FABRIC_MEM_TEST_FILES
         fabric_mem_runtime_stub.cc
         fabric_mem_unittest.cc
+        fabric_mem_translate_unittest.cc
         fabric_mem_aicpu_unfold_unittest.cc
         fabric_mem_config_parser_unittest.cc
         fabric_mem_aicpu_kernel_unittest.cc

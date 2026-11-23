@@ -89,10 +89,19 @@ struct AsyncTransferPollInfo {
   std::string channel_id;
 };
 
+// Sorted-by-old-va remote segment entry for O(log N) address translation.
+struct RemoteSegmentEntry {
+  uintptr_t old_va = 0;
+  uintptr_t new_va = 0;
+  size_t len = 0;
+};
+
 struct FabricMemTransferContext {
   std::string channel_id;
   std::string statistic_channel_id;
   std::unordered_map<uintptr_t, VaInfo> remote_va_to_old_va;
+  // Sorted by old_va, ascending; built together with remote_va_to_old_va.
+  std::vector<RemoteSegmentEntry> remote_segments;
   std::shared_ptr<FabricMemTransferStatisticInfo> stat_info;
 };
 }  // namespace hixl

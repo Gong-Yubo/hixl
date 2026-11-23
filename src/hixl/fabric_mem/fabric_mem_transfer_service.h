@@ -48,6 +48,13 @@ struct FabricMemTransferServiceInitParam {
 
 // Base for fabric_mem transfer services. Owns the channel manager and slot pool; concrete
 // Host/AICPU subclasses implement distinct concurrency models and copy submission paths.
+// Internal translation helpers exposed for unit tests: segments must be sorted by
+// old_va ascending; cached_segment/hit_segment carry the previous hit across descriptors.
+const RemoteSegmentEntry *FindMappedSegment(uintptr_t old_addr, const std::vector<RemoteSegmentEntry> &segments);
+Status AppendRemoteTranslatedOps(const TransferOpDesc &op, const std::vector<RemoteSegmentEntry> &segments,
+                                 const RemoteSegmentEntry *cached_segment, const RemoteSegmentEntry *&hit_segment,
+                                 std::vector<TransferOpDesc> &translated);
+
 class FabricMemTransferService {
  public:
   FabricMemTransferService() = default;

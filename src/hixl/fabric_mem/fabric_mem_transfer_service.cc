@@ -26,26 +26,27 @@ constexpr uint64_t kHostFlagDoneValue = 1ULL;
 constexpr uint64_t kDevConstOneValue = 1ULL;
 constexpr size_t kHostFlagSize = sizeof(uint64_t);
 
-bool FindMappedAddrPrefix(uintptr_t old_addr, const std::unordered_map<uintptr_t, VaInfo> &new_va_to_old_va,
-                          uintptr_t &new_addr, size_t &available_len) {
-  for (const auto &item : new_va_to_old_va) {
-    const auto &info = item.second;
-    if (old_addr < info.va_addr) {
-      continue;
-    }
-    const uintptr_t offset = old_addr - info.va_addr;
-    if (offset >= info.len || item.first > std::numeric_limits<uintptr_t>::max() - offset) {
-      continue;
-    }
-    new_addr = item.first + offset;
-    available_len = info.len - offset;
-    return true;
+
+}  // namespace
+
+const RemoteSegmentEntry *FindMappedSegment(uintptr_t old_addr,
+                                             const std::vector<RemoteSegmentEntry> &segments) {
+  // Binary search over the old-va-sorted segment table: the last entry whose
+  // old_va <= old_addr is the only candidate that can contain old_addr.
+  auto it = std::upper_bound(segments.begin(), segments.end(), old_addr,
+                             [](uintptr_t addr, const RemoteSegmentEntry &entry) { return addr < entry.old_va; });
+  if (it == segments.begin()) {
+    return nullptr;
   }
-  return false;
+  const auto &entry = *(it - 1);
+  if (old_addr - entry.old_va >= entry.len) {
+    return nullptr;
+  }
+  return &entry;
 }
 
-Status AppendRemoteTranslatedOps(const TransferOpDesc &op,
-                                 const std::unordered_map<uintptr_t, VaInfo> &new_va_to_old_va,
+Status AppendRemoteTranslatedOps(const TransferOpDesc &op, const std::vector<RemoteSegmentEntry> &segments,
+                                 const RemoteSegmentEntry *cached_segment, const RemoteSegmentEntry *&hit_segment,
                                  std::vector<TransferOpDesc> &translated) {
   HIXL_CHK_BOOL_RET_STATUS(op.len > 0, PARAM_INVALID, "Fabric mem transfer size must be non-zero.");
   const auto max_addr = std::numeric_limits<uintptr_t>::max();
@@ -54,17 +55,26 @@ Status AppendRemoteTranslatedOps(const TransferOpDesc &op,
   size_t offset = 0;
   while (offset < op.len) {
     const uintptr_t old_remote_addr = op.remote_addr + offset;
-    uintptr_t new_remote_addr = 0;
-    size_t available_len = 0;
-    HIXL_CHK_BOOL_RET_STATUS(FindMappedAddrPrefix(old_remote_addr, new_va_to_old_va, new_remote_addr, available_len),
-                             PARAM_INVALID, "Remote fabric mem address:%lu is not registered.", old_remote_addr);
+    // Contiguous descriptors usually land in the same segment as the previous
+    // one; reuse the cached hit to skip the binary search.
+    const RemoteSegmentEntry *segment = cached_segment;
+    if (segment == nullptr || old_remote_addr < segment->old_va
+        || old_remote_addr - segment->old_va >= segment->len) {
+      segment = FindMappedSegment(old_remote_addr, segments);
+    }
+    HIXL_CHK_BOOL_RET_STATUS(segment != nullptr, PARAM_INVALID,
+                             "Remote fabric mem address:%lu is not registered.", old_remote_addr);
+    hit_segment = segment;
+    const size_t offset_in_segment = old_remote_addr - segment->old_va;
+    const size_t available_len = segment->len - offset_in_segment;
+    HIXL_CHK_BOOL_RET_STATUS(segment->new_va <= max_addr - offset_in_segment, PARAM_INVALID,
+                             "Remote fabric mem address:%lu is not registered.", old_remote_addr);
     const size_t chunk_len = std::min(op.len - offset, available_len);
-    translated.emplace_back(TransferOpDesc{op.local_addr + offset, new_remote_addr, chunk_len});
+    translated.emplace_back(TransferOpDesc{op.local_addr + offset, segment->new_va + offset_in_segment, chunk_len});
     offset += chunk_len;
   }
   return SUCCESS;
 }
-}  // namespace
 
 uint64_t FabricMemTransferService::GetTransferBytes(const std::vector<TransferOpDesc> &op_descs) {
   uint64_t total_bytes = 0UL;
@@ -301,8 +311,10 @@ Status FabricMemTransferService::ResolveTransferAddrs(std::vector<TransferOpDesc
                       "Check local fabric mem address type failed.");
   std::vector<TransferOpDesc> translated;
   translated.reserve(op_descs.size());
+  const RemoteSegmentEntry *cached_segment = nullptr;
   for (const auto &op : op_descs) {
-    HIXL_CHK_STATUS_RET(AppendRemoteTranslatedOps(op, context.remote_va_to_old_va, translated),
+    HIXL_CHK_STATUS_RET(AppendRemoteTranslatedOps(op, context.remote_segments, cached_segment, cached_segment,
+                                                  translated),
                         "Translate remote fabric mem address failed.");
   }
   op_descs.swap(translated);
@@ -317,13 +329,20 @@ Status FabricMemTransferService::ResolveTransferAddrs(std::vector<TransferOpDesc
 Status FabricMemTransferService::TransOpAddr(uintptr_t old_addr, size_t len,
                                              const std::unordered_map<uintptr_t, VaInfo> &new_va_to_old_va,
                                              uintptr_t &new_addr) {
-  uintptr_t translated_addr = 0;
-  size_t available_len = 0;
-  HIXL_CHK_BOOL_RET_STATUS(
-      FindMappedAddrPrefix(old_addr, new_va_to_old_va, translated_addr, available_len) && len <= available_len,
-      PARAM_INVALID, "Fabric mem address:%lu, len:%zu not found in registered segments.", old_addr, len);
-  new_addr = translated_addr;
-  return SUCCESS;
+  // Single-address utility API (not on the transfer hot path): linear scan is fine here.
+  for (const auto &item : new_va_to_old_va) {
+    const auto &info = item.second;
+    if (old_addr < info.va_addr) {
+      continue;
+    }
+    const uintptr_t offset = old_addr - info.va_addr;
+    if (offset < info.len && len <= info.len - offset) {
+      new_addr = item.first + offset;
+      return SUCCESS;
+    }
+  }
+  HIXL_LOGE(PARAM_INVALID, "Fabric mem address:%lu, len:%zu not found in registered segments.", old_addr, len);
+  return PARAM_INVALID;
 }
 
 void FabricMemTransferService::UpdateStats(const std::string &channel_id, const std::string &statistic_channel_id,

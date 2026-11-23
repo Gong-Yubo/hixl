@@ -11,6 +11,7 @@
 #include "fabric_mem/fabric_mem_channel_manager.h"
 
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <utility>
 #include <vector>
@@ -364,6 +365,12 @@ Status FabricMemChannelManager::BuildTransferContext(const std::string &remote_e
   context.channel_id = remote_engine;
   context.statistic_channel_id = FabricMemStatistic::GetClientStatisticChannelId(remote_engine);
   context.remote_va_to_old_va = it->second->remote_memory->GetNewVaToOldVa();
+  context.remote_segments.reserve(context.remote_va_to_old_va.size());
+  for (const auto &[new_va, info] : context.remote_va_to_old_va) {
+    context.remote_segments.emplace_back(RemoteSegmentEntry{info.va_addr, new_va, info.len});
+  }
+  std::sort(context.remote_segments.begin(), context.remote_segments.end(),
+            [](const RemoteSegmentEntry &lhs, const RemoteSegmentEntry &rhs) { return lhs.old_va < rhs.old_va; });
   FabricMemStatistic *stat = statistic != nullptr ? statistic : statistic_;
   HIXL_CHK_BOOL_RET_STATUS(stat != nullptr, FAILED, "[FabricMemChannelManager] Statistic is not available.");
   context.stat_info = stat->GetOrCreateStatisticInfo(context.statistic_channel_id);
